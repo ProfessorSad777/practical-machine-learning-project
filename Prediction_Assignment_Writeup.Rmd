@@ -1,0 +1,147 @@
+---
+title: "Predicting Barbell Exercise Quality"
+author: "Saathvik"
+date: "26 September 2026"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: cosmo
+    code_folding: show
+    self_contained: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 8, fig.height = 5)
+library(caret)
+library(randomForest)
+set.seed(2026)
+```
+
+## Objective
+
+The outcome is `classe`, which records whether a participant performed a barbell lift correctly (A) or made one of four common mistakes (B-E). The predictors are measurements from accelerometers on the belt, arm, forearm, and dumbbell. The aim is to build a model with a realistic estimate of out-of-sample performance and apply it to the 20 quiz cases.
+
+## Data preparation
+
+The original data contain 19,622 training observations and 160 columns. I removed the first seven columns because they are row identifiers, participant names, timestamps, and window-management fields rather than sensor measurements. I also removed predictors with at least 95% missing values, nonnumeric fields, and zero-variance fields. This left 52 complete numeric sensor predictors.
+
+```{r data}
+training_url <- paste0(
+  "https://d396qusza40orc.cloudfront.net/",
+  "predmachlearn/pml-training.csv"
+)
+testing_url <- paste0(
+  "https://d396qusza40orc.cloudfront.net/",
+  "predmachlearn/pml-testing.csv"
+)
+
+training_raw <- read.csv(training_url,
+                         na.strings = c("NA", "#DIV/0!", ""))
+testing_raw <- read.csv(testing_url,
+                        na.strings = c("NA", "#DIV/0!", ""))
+
+candidate_names <- names(training_raw)[8:(ncol(training_raw) - 1)]
+usable <- vapply(training_raw[candidate_names], function(x) {
+  is.numeric(x) && mean(is.na(x)) < 0.05 &&
+    length(unique(na.omit(x))) > 1
+}, logical(1))
+
+predictor_names <- candidate_names[usable]
+model_data <- training_raw[c(predictor_names, "classe")]
+quiz_data <- testing_raw[predictor_names]
+
+dim(model_data)
+table(model_data$classe)
+```
+
+No imputation or principal-component transformation was needed because the selected predictors were complete. Keeping the original measurements also preserves interpretability.
+
+## Model and cross-validation
+
+I reserved 25% of the training observations as a stratified validation set. A random forest was chosen because the relationship between body motion and exercise quality is nonlinear and includes interactions among sensors. Random forests handle these patterns without manual interaction terms and are robust to correlated predictors.
+
+The remaining 75% was used for model fitting. Five-fold cross-validation estimated performance during training. The number of variables considered at each split was fixed at 7, approximately the square root of 52, and 500 trees were grown.
+
+```{r model}
+in_build <- createDataPartition(model_data$classe,
+                                p = 0.75, list = FALSE)
+build <- model_data[in_build, ]
+validation <- model_data[-in_build, ]
+
+control <- trainControl(method = "cv", number = 5,
+                        savePredictions = "final")
+
+rf_fit <- train(
+  classe ~ ., data = build,
+  method = "rf",
+  trControl = control,
+  tuneGrid = data.frame(mtry = 7),
+  ntree = 500,
+  importance = TRUE
+)
+
+rf_fit$results[c("mtry", "Accuracy", "Kappa")]
+```
+
+Across the five folds, mean accuracy was approximately **99.27%** with a standard deviation of **0.16 percentage points**. Agreement was consistently high across folds, so a more complex tuning search was unlikely to produce a meaningful practical improvement.
+
+## Out-of-sample performance
+
+```{r validation}
+validation_prediction <- predict(rf_fit, validation)
+validation_result <- confusionMatrix(
+  validation_prediction, validation$classe
+)
+validation_result$table
+validation_result$overall[c("Accuracy", "Kappa")]
+```
+
+The independent validation set contained 4,906 observations. Accuracy was **99.59%**, corresponding to an estimated out-of-sample error of **0.41%**. This agrees closely with cross-validation and the random forest's out-of-bag estimate, so there is little evidence that the fitted model is over-optimistic.
+
+```{r confusion-figure, echo=FALSE}
+cm <- validation_result$table
+par(mar = c(5, 5, 2, 1))
+image(t(cm[nrow(cm):1, ]), axes = FALSE,
+      col = hcl.colors(12, "Blues 3"),
+      main = "Validation confusion matrix")
+axis(1, at = seq(0, 1, length.out = 5), labels = colnames(cm))
+axis(2, at = seq(0, 1, length.out = 5), labels = rev(rownames(cm)))
+mtext("Reference class", side = 1, line = 3)
+mtext("Predicted class", side = 2, line = 3)
+```
+
+The most informative measurements came from the belt, forearm, and dumbbell. In particular, belt roll and yaw, forearm pitch, and dumbbell magnetometer readings contributed strongly.
+
+```{r importance-figure, echo=FALSE}
+varImpPlot(rf_fit$finalModel, n.var = 15,
+           main = "Most important sensor measurements")
+```
+
+## Predictions for the 20 quiz cases
+
+The final model was refitted on all 19,622 labeled observations before predicting the quiz set.
+
+```{r final-predictions}
+final_model <- randomForest(
+  classe ~ ., data = model_data,
+  mtry = 7, ntree = 500, importance = TRUE
+)
+
+quiz_predictions <- predict(final_model, quiz_data)
+data.frame(problem_id = testing_raw$problem_id,
+           prediction = quiz_predictions)
+```
+
+The predictions, in `problem_id` order, are:
+
+`B, A, B, A, A, E, D, B, A, A, B, C, B, A, E, E, A, B, B, B`.
+
+## Conclusion
+
+The random forest separated the five exercise classes with low and consistently estimated error. The close agreement among five-fold cross-validation, out-of-bag performance, and the untouched validation set supports an expected out-of-sample error of about 0.4% for observations drawn under similar conditions.
+
+## Reference
+
+Velloso, E., Bulling, A., Gellersen, H., Ugulino, W., and Fuks, H. (2013). *Qualitative Activity Recognition of Weight Lifting Exercises*. Proceedings of AH 2013.
