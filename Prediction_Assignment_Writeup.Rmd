@@ -1,147 +1,283 @@
 ---
 title: "Predicting Barbell Exercise Quality"
-author: "Saathvik"
-date: "26 September 2026"
+date: "7 October 2026"
 output:
   html_document:
     toc: true
     toc_float: true
-    theme: cosmo
-    code_folding: show
+    theme: readable
+    code_folding: hide
     self_contained: true
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
-                      fig.width = 8, fig.height = 5)
-library(caret)
-library(randomForest)
+                      fig.width = 8, fig.height = 4.8)
+library(ranger)
+library(rpart)
 set.seed(2026)
+pct <- function(x) sprintf("%.2f%%", 100 * x)
 ```
 
 ## Objective
 
-The outcome is `classe`, which records whether a participant performed a barbell lift correctly (A) or made one of four common mistakes (B-E). The predictors are measurements from accelerometers on the belt, arm, forearm, and dumbbell. The aim is to build a model with a realistic estimate of out-of-sample performance and apply it to the 20 quiz cases.
+This analysis predicts `classe`, the manner in which a participant performed a
+barbell lift, from belt, arm, forearm, and dumbbell sensor measurements. Class A
+denotes correct execution and B-E denote four prescribed mistakes. The goal is
+to compare a simple classifier with a random forest, estimate performance on
+unseen recording windows, and predict the 20 unlabeled course cases.
 
-## Data preparation
+## Data and validation design
 
-The original data contain 19,622 training observations and 160 columns. I removed the first seven columns because they are row identifiers, participant names, timestamps, and window-management fields rather than sensor measurements. I also removed predictors with at least 95% missing values, nonnumeric fields, and zero-variance fields. This left 52 complete numeric sensor predictors.
+The course provides a labeled training CSV and a separate 20-row testing CSV.
+The testing file has no observed `classe` and is not used for model selection or
+error estimation. The source is the Weight Lifting Exercise Dataset of Velloso
+and colleagues, cited below.
 
 ```{r data}
-training_url <- paste0(
-  "https://d396qusza40orc.cloudfront.net/",
-  "predmachlearn/pml-training.csv"
-)
-testing_url <- paste0(
-  "https://d396qusza40orc.cloudfront.net/",
-  "predmachlearn/pml-testing.csv"
-)
+base_url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/"
+data_dir <- Sys.getenv("PML_DATA_DIR", "data")
+dir.create(data_dir, recursive = TRUE, showWarnings = FALSE)
+read_course_data <- function(filename) {
+  path <- file.path(data_dir, filename)
+  if (!file.exists(path)) {
+    download.file(paste0(base_url, filename), path, mode = "wb",
+                  quiet = TRUE)
+  }
+  read.csv(path, na.strings = c("NA", "#DIV/0!", ""),
+           stringsAsFactors = FALSE)
+}
+training_raw <- read_course_data("pml-training.csv")
+testing_raw <- read_course_data("pml-testing.csv")
+training_raw$classe <- factor(training_raw$classe, levels = LETTERS[1:5])
+stopifnot(nrow(training_raw) == 19622, nrow(testing_raw) == 20)
 
-training_raw <- read.csv(training_url,
-                         na.strings = c("NA", "#DIV/0!", ""))
-testing_raw <- read.csv(testing_url,
-                        na.strings = c("NA", "#DIV/0!", ""))
+group <- paste(training_raw$user_name, training_raw$num_window, sep = ":")
+first <- !duplicated(group)
+group_table <- data.frame(group = group[first],
+                          classe = training_raw$classe[first])
+stopifnot(all(vapply(split(training_raw$classe, group),
+                     function(x) length(unique(x)), integer(1)) == 1))
 
-candidate_names <- names(training_raw)[8:(ncol(training_raw) - 1)]
-usable <- vapply(training_raw[candidate_names], function(x) {
-  is.numeric(x) && mean(is.na(x)) < 0.05 &&
-    length(unique(na.omit(x))) > 1
+build_groups <- unlist(lapply(split(group_table$group, group_table$classe),
+                             function(x) sample(x, floor(0.75 * length(x)))),
+                       use.names = FALSE)
+in_build <- group %in% build_groups
+stopifnot(length(intersect(unique(group[in_build]),
+                           unique(group[!in_build]))) == 0)
+
+candidate_names <- names(training_raw)[8:159]
+usable <- vapply(training_raw[in_build, candidate_names], function(x) {
+  is.numeric(x) && !anyNA(x) && length(unique(x)) > 1
 }, logical(1))
-
 predictor_names <- candidate_names[usable]
 model_data <- training_raw[c(predictor_names, "classe")]
-quiz_data <- testing_raw[predictor_names]
-
-dim(model_data)
-table(model_data$classe)
-```
-
-No imputation or principal-component transformation was needed because the selected predictors were complete. Keeping the original measurements also preserves interpretability.
-
-## Model and cross-validation
-
-I reserved 25% of the training observations as a stratified validation set. A random forest was chosen because the relationship between body motion and exercise quality is nonlinear and includes interactions among sensors. Random forests handle these patterns without manual interaction terms and are robust to correlated predictors.
-
-The remaining 75% was used for model fitting. Five-fold cross-validation estimated performance during training. The number of variables considered at each split was fixed at 7, approximately the square root of 52, and 500 trees were grown.
-
-```{r model}
-in_build <- createDataPartition(model_data$classe,
-                                p = 0.75, list = FALSE)
 build <- model_data[in_build, ]
-validation <- model_data[-in_build, ]
+validation <- model_data[!in_build, ]
+quiz <- testing_raw[predictor_names]
+stopifnot(length(predictor_names) == 52, !anyNA(validation), !anyNA(quiz))
 
-control <- trainControl(method = "cv", number = 5,
-                        savePredictions = "final")
-
-rf_fit <- train(
-  classe ~ ., data = build,
-  method = "rf",
-  trControl = control,
-  tuneGrid = data.frame(mtry = 7),
-  ntree = 500,
-  importance = TRUE
-)
-
-rf_fit$results[c("mtry", "Accuracy", "Kappa")]
+knitr::kable(data.frame(
+  Class = levels(model_data$classe),
+  Build = as.integer(table(build$classe)),
+  Validation = as.integer(table(validation$classe))),
+  caption = "Class counts after the grouped split")
 ```
 
-Across the five folds, mean accuracy was approximately **99.27%** with a standard deviation of **0.16 percentage points**. Agreement was consistently high across folds, so a more complex tuning search was unlikely to produce a meaningful practical improvement.
+There are `r nrow(training_raw)` labeled rows, `r ncol(training_raw)` columns,
+six participants, and `r nrow(group_table)` participant/window groups. Repeated
+readings in a recording window are related. A random row split could therefore
+give an optimistic estimate. Approximately 75% of windows within each class
+were assigned to model building and the remainder to an untouched validation
+set. This produced `r nrow(build)` build rows in
+`r length(unique(group[in_build]))` windows and `r nrow(validation)` validation
+rows in `r length(unique(group[!in_build]))` windows.
 
-## Out-of-sample performance
+The first seven fields are identifiers, participant names, timestamps, and
+window descriptors. They define groups but are excluded as predictors. Feature
+screening used only the build partition. The `r length(predictor_names)` retained
+measurements are numeric, complete, and nonconstant. Most excluded sensor
+summary fields are almost entirely missing. Selected measurements are also
+complete in validation and the quiz file, so no imputation is needed. Tree
+models do not require scaling. No feature selection used validation outcomes.
+
+## Models and grouped cross-validation
+
+A single classification tree provides an interpretable baseline. A random
+forest can capture nonlinear boundaries and interactions while averaging
+many trees to reduce variance. Five-fold cross-validation was performed within
+the build partition. Windows, stratified by class, were assigned to folds as
+whole groups. All candidate models used exactly the same folds.
+
+For the forest, the number of candidate variables per split (`mtry`) was tested
+at 2, 7, and 14. Seven is near the square root of 52. Each tuning fit used 300
+trees, Gini splitting, and a minimum node size of one. The baseline used
+`rpart` with complexity parameter 0.01. Mean fold accuracy selected the forest
+setting. The validation set did not participate in this decision.
+
+```{r cross-validation}
+build_group_table <- group_table[group_table$group %in% build_groups, ]
+build_group_table$fold <- 0L
+for (class in levels(model_data$classe)) {
+  idx <- which(build_group_table$classe == class)
+  build_group_table$fold[idx] <- sample(rep(1:5, length.out = length(idx)))
+}
+row_fold <- build_group_table$fold[
+  match(group[in_build], build_group_table$group)]
+cv_results <- data.frame()
+for (fold in 1:5) {
+  fit_rows <- row_fold != fold
+  test_rows <- !fit_rows
+  tree <- rpart(classe ~ ., data = build[fit_rows, ], method = "class",
+                control = rpart.control(cp = 0.01, xval = 0))
+  tree_prediction <- predict(tree, build[test_rows, ], type = "class")
+  cv_results <- rbind(cv_results, data.frame(
+    Model = "Single tree", mtry = NA_integer_, Fold = fold,
+    Accuracy = mean(tree_prediction == build$classe[test_rows])))
+  for (m in c(2, 7, 14)) {
+    forest <- ranger(classe ~ ., data = build[fit_rows, ],
+                      num.trees = 300, mtry = m, min.node.size = 1,
+                      splitrule = "gini", seed = 2026 + 100 * fold + m,
+                      num.threads = 2)
+    prediction <- predict(forest, build[test_rows, ])$predictions
+    cv_results <- rbind(cv_results, data.frame(
+      Model = "Random forest", mtry = m, Fold = fold,
+      Accuracy = mean(prediction == build$classe[test_rows])))
+  }
+}
+settings <- c("Single tree", "RF: mtry = 2", "RF: mtry = 7", "RF: mtry = 14")
+cv_results$Setting <- ifelse(cv_results$Model == "Single tree", "Single tree",
+                             paste0("RF: mtry = ", cv_results$mtry))
+cv_summary <- do.call(rbind, lapply(settings, function(setting) {
+  a <- cv_results$Accuracy[cv_results$Setting == setting]
+  data.frame(Setting = setting, Mean_accuracy = mean(a),
+             Fold_SD = sd(a), Mean_error = 1 - mean(a))
+}))
+best <- which.max(cv_summary$Mean_accuracy[-1])
+best_mtry <- c(2, 7, 14)[best]
+best_cv <- cv_summary$Mean_accuracy[best + 1]
+cv_display <- cv_summary
+cv_display[-1] <- lapply(cv_display[-1], function(x) sprintf("%.2f%%", 100 * x))
+knitr::kable(cv_display, col.names = c("Model", "Mean accuracy",
+                                      "Fold SD", "Mean error"))
+```
+
+The selected `mtry` is `r best_mtry`, with mean cross-validation accuracy
+`r pct(best_cv)` and estimated error `r pct(1 - best_cv)`. The table distinguishes
+fold-to-fold standard deviation from a confidence interval. Tuning is limited
+to a small grid to keep the analysis practical and reproducible.
+
+## Untouched validation performance
+
+After choosing `mtry`, the forest was trained on the whole build partition
+with 500 trees. This increases ensemble size without using validation labels
+to tune the model. Accuracy and the confusion matrix were calculated once on
+the reserved windows.
 
 ```{r validation}
-validation_prediction <- predict(rf_fit, validation)
-validation_result <- confusionMatrix(
-  validation_prediction, validation$classe
-)
-validation_result$table
-validation_result$overall[c("Accuracy", "Kappa")]
+validation_model <- ranger(classe ~ ., data = build,
+                            num.trees = 500, mtry = best_mtry,
+                            min.node.size = 1, splitrule = "gini",
+                            importance = "permutation", seed = 2026,
+                            num.threads = 2)
+validation_prediction <- predict(validation_model, validation)$predictions
+cm <- table(Predicted = validation_prediction, Observed = validation$classe)
+correct <- sum(diag(cm))
+accuracy <- correct / sum(cm)
+errors <- sum(cm) - correct
+recall <- diag(cm) / colSums(cm)
+knitr::kable(cm, caption = "Validation confusion matrix: rows predicted, columns observed")
+knitr::kable(data.frame(Class = names(recall), Recall = sprintf("%.2f%%", 100 * recall)))
+
+validation_group <- group[!in_build]
+window_correct <- tapply(validation_prediction == validation$classe,
+                         validation_group, sum)
+window_n <- table(validation_group)[names(window_correct)]
+set.seed(2027)
+bootstrap_accuracy <- replicate(2000, {
+  idx <- sample.int(length(window_correct), replace = TRUE)
+  sum(window_correct[idx]) / sum(window_n[idx])
+})
+accuracy_ci <- quantile(bootstrap_accuracy, c(0.025, 0.975))
 ```
 
-The independent validation set contained 4,906 observations. Accuracy was **99.59%**, corresponding to an estimated out-of-sample error of **0.41%**. This agrees closely with cross-validation and the random forest's out-of-bag estimate, so there is little evidence that the fitted model is over-optimistic.
+The model correctly classified `r correct` of `r sum(cm)` validation readings,
+with `r errors` errors. **Validation accuracy is `r pct(accuracy)` and estimated
+out-of-sample error is `r pct(1 - accuracy)`.** A percentile bootstrap resampling
+the validation windows 2,000 times gives an approximate 95% accuracy interval
+of `r pct(accuracy_ci[1])` to `r pct(accuracy_ci[2])`. Resampling whole windows
+preserves within-window dependence. The interval reflects validation sampling
+uncertainty conditional on the fitted model, not all model-selection uncertainty.
 
-```{r confusion-figure, echo=FALSE}
-cm <- validation_result$table
-par(mar = c(5, 5, 2, 1))
-image(t(cm[nrow(cm):1, ]), axes = FALSE,
-      col = hcl.colors(12, "Blues 3"),
-      main = "Validation confusion matrix")
-axis(1, at = seq(0, 1, length.out = 5), labels = colnames(cm))
-axis(2, at = seq(0, 1, length.out = 5), labels = rev(rownames(cm)))
-mtext("Reference class", side = 1, line = 3)
-mtext("Predicted class", side = 2, line = 3)
+```{r importance-figure, echo=FALSE, fig.cap="Top 12 measurements by permutation importance in the build-partition forest. Importance describes predictive contribution, not causality."}
+importance <- sort(validation_model$variable.importance, decreasing = TRUE)
+top <- head(importance, 12)
+par(mar = c(4, 11, 2, 1), las = 1)
+barplot(rev(top), horiz = TRUE, col = "#427c8e", border = NA,
+         xlab = "Permutation importance", cex.names = 0.85)
 ```
 
-The most informative measurements came from the belt, forearm, and dumbbell. In particular, belt roll and yaw, forearm pitch, and dumbbell magnetometer readings contributed strongly.
+The highest-ranked measurement is `r names(importance)[1]`. Permutation
+importance can be affected by correlated sensors, so the ranking is descriptive.
+The single-tree comparison and the holdout assessment provide separate evidence
+for choosing the forest.
 
-```{r importance-figure, echo=FALSE}
-varImpPlot(rf_fit$finalModel, n.var = 15,
-           main = "Most important sensor measurements")
-```
+## Predictions for the 20 course cases
 
-## Predictions for the 20 quiz cases
-
-The final model was refitted on all 19,622 labeled observations before predicting the quiz set.
+Only after validation was complete, a final 500-tree forest with the selected
+settings was fitted to all labeled rows. The same 52 predictors were retained.
+The table is sorted by `problem_id`, rather than relying on file row order.
 
 ```{r final-predictions}
-final_model <- randomForest(
-  classe ~ ., data = model_data,
-  mtry = 7, ntree = 500, importance = TRUE
-)
-
-quiz_predictions <- predict(final_model, quiz_data)
-data.frame(problem_id = testing_raw$problem_id,
-           prediction = quiz_predictions)
+final_model <- ranger(classe ~ ., data = model_data,
+                       num.trees = 500, mtry = best_mtry,
+                       min.node.size = 1, splitrule = "gini",
+                       seed = 2028, num.threads = 2)
+quiz_prediction <- predict(final_model, quiz)$predictions
+answers <- data.frame(problem_id = testing_raw$problem_id,
+                      prediction = as.character(quiz_prediction))
+answers <- answers[order(answers$problem_id), ]
+stopifnot(identical(answers$problem_id, 1:20),
+           all(answers$prediction %in% LETTERS[1:5]))
+knitr::kable(answers)
+writeLines(paste(answers$problem_id, answers$prediction, sep = ": "),
+            "predictions.txt")
 ```
 
-The predictions, in `problem_id` order, are:
+Predictions in problem order:
+**`r paste(answers$prediction, collapse = ", ")`**.
 
-`B, A, B, A, A, E, D, B, A, A, B, C, B, A, E, E, A, B, B, B`.
+## Conclusion and limitations
 
-## Conclusion
+The random forest predicts exercise class with an estimated error of
+`r pct(1 - accuracy)` on reserved recording windows. This is an estimate for
+similar measurements under the study protocol, not a guarantee for each quiz
+case. No labels are available to measure accuracy on the 20 course cases.
 
-The random forest separated the five exercise classes with low and consistently estimated error. The close agreement among five-fold cross-validation, out-of-bag performance, and the untouched validation set supports an expected out-of-sample error of about 0.4% for observations drawn under similar conditions.
+Window grouping reduces one source of leakage, but the build and validation
+partitions still contain the same six participants. Nearby windows may also
+be related. Performance for new people, recording sessions, or devices may be
+lower. A larger study with participant- or session-held-out validation would
+be needed for a deployment claim.
 
-## Reference
+## Reproducibility and sources
 
-Velloso, E., Bulling, A., Gellersen, H., Ugulino, W., and Fuks, H. (2013). *Qualitative Activity Recognition of Weight Lifting Exercises*. Proceedings of AH 2013.
+The report was compiled with `knitr` and `rmarkdown`. To reproduce it, install
+`rmarkdown`, `knitr`, `ranger`, and `rpart`, then run
+`rmarkdown::render("Prediction_Assignment_Writeup.Rmd")` from the project
+directory. Missing data files are downloaded from the course links. Fixed seeds
+specify splitting and model fitting. The HTML includes evaluated results and
+one figure, so peer reviewers do not need to run R.
+
+Velloso, E., Bulling, A., Gellersen, H., Ugulino, W., and Fuks, H. (2013).
+*Qualitative Activity Recognition of Weight Lifting Exercises*. Proceedings
+of the 4th Augmented Human International Conference, pp. 116-123.
+[DOI: 10.1145/2459236.2459256](https://doi.org/10.1145/2459236.2459256).
+[Archived dataset description](https://web.archive.org/web/20161224072740/http://groupware.les.inf.puc-rio.br/har).
+
+Data: [training CSV](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv)
+and [testing CSV](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv).
+
+```{r session, echo=FALSE}
+sessionInfo()
+```

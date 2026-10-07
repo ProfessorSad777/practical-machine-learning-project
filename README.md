@@ -7,11 +7,11 @@ Prediction assignment for the Johns Hopkins University Practical Machine Learnin
 - [Compiled HTML](Prediction_Assignment_Writeup.html)
 - [Predictions for the 20 quiz cases](predictions.txt)
 
-The analysis predicts the `classe` outcome in the Weight Lifting Exercise Dataset. After removing administrative and mostly missing fields, a random forest was trained on 52 sensor measurements. Model performance was assessed with five-fold cross-validation and a separate 25% stratified validation set.
+The analysis predicts the `classe` outcome in the Weight Lifting Exercise Dataset using 52 sensor measurements. A classification tree is compared with three random-forest settings using five-fold cross-validation. Both cross-validation and the holdout split keep participant/recording-window groups together, preventing readings from one window from entering both sides of a split.
 
-The mean cross-validation accuracy was 99.27%. Accuracy on the untouched validation set was 99.59%, giving an estimated out-of-sample error of 0.41%.
+The selected forest uses 14 candidate variables per split. Mean grouped cross-validation accuracy is 92.48%. Accuracy on 4,993 readings from 216 untouched validation windows is 95.61%, giving an estimated out-of-sample error of 4.39%. A window bootstrap gives an approximate 95% accuracy interval of 93.62% to 97.35%. The report discusses why these results do not establish performance for new participants.
 
-The repository contains the complete R Markdown analysis and a compiled, self-contained HTML report for peer review.
+The repository contains the complete R Markdown analysis, an HTML report compiled with knitr, and the 20 predictions in problem order. The writeup is under 2,000 words and contains one figure.
 
 ## Data source
 
